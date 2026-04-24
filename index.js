@@ -200,7 +200,7 @@
                 </div>
                 <div id="tape-body"><div style="text-align:center; padding:30px; color:#949ba4; font-size:12px">Initializing System...</div></div>
                 <div id="tape-logs"></div>
-                <div id="tape-footer">Developed by: <a href="https://discord.com/users/1419678867005767783" target="_blank" class="dev-btn">syntt_</a></div>
+                <div id="tape-footer">Developed by: <a href="https://github.com/Massivendurchfall/discord-auto-quest" target="_blank" class="dev-btn">L61r</a></div>
             `;
             document.body.appendChild(this.root);
 
