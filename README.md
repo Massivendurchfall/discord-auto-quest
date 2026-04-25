@@ -3,7 +3,6 @@
 > [!NOTE]
 > This does not work in the browser for quests that require playing or streaming a game! Use the official [Discord desktop app](https://discord.com/download) for those quests.
 
-# DOESENT WORK IN BROWSER
 
 ### How to use this script:
 1. Accept a quest in the Quests tab.
