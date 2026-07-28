@@ -3,7 +3,7 @@
 
     const CONFIG = {
         NAME: "Tape",
-        VERSION: "v4.5.3 (Enterprise)",
+        VERSION: "v4.5.3 (Enterprise - Heartbeat Fix)",
         THEME: "#5865F2",
         SUCCESS: "#3BA55C",
         WARN: "#faa61a",
@@ -908,76 +908,90 @@
             }
         },
 
-        GAME(q, t, s) { return Tasks.generic(q, t, "GAME", "PLAY_ON_DESKTOP", s); },
-        STREAM(q, t, s) { return Tasks.generic(q, t, "STREAM", "STREAM_ON_DESKTOP", s); },
-
-        async generic(q, t, type, key, s) {
+        // Neue Heartbeat-Spoofing-Methode für GAME & STREAM
+        async spoofedHeartbeatTask(q, t, type, progressKey) {
             if (!RUNTIME.running) return;
-            const gameData = await this.fetchGameData(t.appId, t.name);
 
-            return new Promise(resolve => {
-                const pid = rnd(2500, 12500) * 4;
-                const game = {
-                    id: gameData.id, name: gameData.name, icon: gameData.icon,
-                    pid, pidPath: [pid], processName: gameData.name, start: Date.now(),
-                    exeName: gameData.exeName, exePath: gameData.exePath, cmdLine: gameData.cmdLine,
-                    executables: [{ os: 'win32', name: gameData.exeName, is_launcher: false }],
-                    windowHandle: 0, fullscreenType: 0, overlay: true, sandboxed: false,
-                    hidden: false, isLauncher: false
-                };
+            let chan = null;
+            try {
+                chan = Mods.ChanStore?.getSortedPrivateChannels()?.[0]?.id
+                    ?? Object.values(Mods.GuildChanStore?.getAllGuilds() ?? {})
+                        .find(g => g?.VOCAL?.length)?.VOCAL?.[0]?.channel?.id;
+            } catch (e) {
+                Logger.log(`[${type}] Channel lookup error: ${e.message}`, 'debug');
+            }
 
-                let cleanupHook;
-                let cleaned = false;
-                let safetyTimer;
+            if (!chan) {
+                return Tasks.failTask(q, t, 'No voice channel found');
+            }
 
-                if (type === "STREAM") {
-                    const real = Mods.StreamStore?.getStreamerActiveStreamMetadata;
-                    if (Mods.StreamStore) {
-                        Mods.StreamStore.getStreamerActiveStreamMetadata = () => ({ id: gameData.id, pid, sourceName: gameData.name });
+            const key = `call:${chan}:${rnd(1000, 9999)}`;
+            let cur = 0;
+            let failCount = 0;
+            Logger.updateTask(q.id, { name: t.name, type, cur, max: t.target, status: "RUNNING" });
+            Logger.log(`[Task] Started ${type} spoofing: ${t.name}`, 'info');
+
+            const startTime = Date.now();
+
+            while (cur < t.target && RUNTIME.running) {
+                try {
+                    const r = await Traffic.enqueue(`/quests/${q.id}/heartbeat`, {
+                        stream_key: key,
+                        terminal: false,
+                        location: 11,
+                        is_targeted: false
+                    });
+
+                    const newProg = r?.body?.progress?.[progressKey]?.value
+                        ?? r?.body?.progress?.[t.keyName]?.value
+                        ?? (cur + 15);
+
+                    cur = Math.max(cur, newProg);
+                    Logger.updateTask(q.id, { name: t.name, type, cur, max: t.target, status: "RUNNING" });
+                    failCount = 0;
+
+                    if (cur >= t.target) {
+                        try {
+                            await Traffic.enqueue(`/quests/${q.id}/heartbeat`, {
+                                stream_key: key,
+                                terminal: true,
+                                location: 11,
+                                is_targeted: false
+                            });
+                        } catch (_) {}
+                        break;
                     }
-                    cleanupHook = () => { if (Mods.StreamStore && real) Mods.StreamStore.getStreamerActiveStreamMetadata = real; };
-                } else {
-                    Patcher.add(game);
-                    cleanupHook = () => Patcher.remove(game);
+                } catch (e) {
+                    failCount++;
+                    const err = ErrorHandler.classify(e);
+                    if (err.isClientError) {
+                        Logger.log(`[Task] ${type} quest unavailable (HTTP ${err.status}). Skipping.`, 'warn');
+                        return Tasks.failTask(q, t, `Client Error ${err.status}`);
+                    }
+                    if (failCount >= SYS.MAX_TASK_FAILURES) {
+                        return Tasks.failTask(q, t, 'Too many network failures');
+                    }
+                    Logger.log(`[Task] ${type} heartbeat failed (${failCount}/${SYS.MAX_TASK_FAILURES}): ${err.message}`, 'debug');
                 }
 
-                Logger.updateTask(q.id, { name: t.name, type, cur: 0, max: t.target, status: "RUNNING" });
-                Logger.log(`[Task] Started ${type}: ${gameData.name}`, 'info');
+                if (Date.now() - startTime > SYS.MAX_TIME) {
+                    return Tasks.failTask(q, t, 'Timeout exceeded');
+                }
 
-                const finish = () => {
-                    if (cleaned) return;
-                    cleaned = true;
-                    clearTimeout(safetyTimer);
-                    try { cleanupHook(); } catch (e) { Logger.log(`[Task] Cleanup: ${e.message}`, 'debug'); }
-                    try { Mods.Dispatcher?.unsubscribe(CONST.EVT.HEARTBEAT, check); } catch (e) {
-                        Logger.log(`[Dispatcher] Unsubscribe failed: ${e.message}`, 'debug');
-                    }
-                    RUNTIME.cleanups.delete(finish);
-                };
+                await sleep(rnd(19000, 22000));
+            }
 
-                safetyTimer = setTimeout(() => {
-                    if (RUNTIME.running) Tasks.failTask(q, t, 'Timeout exceeded (25m)');
-                    finish();
-                    resolve();
-                }, SYS.MAX_TIME);
+            if (RUNTIME.running && cur >= t.target) {
+                Tasks.finish(q, t);
+            }
+        },
 
-                const check = (d) => {
-                    if (!RUNTIME.running) { finish(); resolve(); return; }
-                    if (d?.questId !== q.id) return;
-
-                    const prog = d.userStatus?.progress?.[key]?.value ?? d.userStatus?.streamProgressSeconds ?? 0;
-                    Logger.updateTask(q.id, { name: t.name, type, cur: prog, max: t.target, status: "RUNNING" });
-
-                    if (prog >= t.target) {
-                        finish();
-                        Tasks.finish(q, t);
-                        resolve();
-                    }
-                };
-
-                Mods.Dispatcher?.subscribe(CONST.EVT.HEARTBEAT, check);
-                RUNTIME.cleanups.add(finish);
-            });
+        // GAME und STREAM nutzen jetzt die neue Heartbeat-Methode
+        GAME(q, t, s) {
+            return Tasks.spoofedHeartbeatTask(q, t, "GAME", "PLAY_ON_DESKTOP");
+        },
+        STREAM(q, t, s) {
+            return Tasks.spoofedHeartbeatTask(q, t, "STREAM", "STREAM_ON_DESKTOP");
         },
 
         async ACHIEVEMENT(q, t) {
@@ -997,14 +1011,25 @@
 
                 while (cur < t.target && RUNTIME.running) {
                     try {
-                        const r = await Traffic.enqueue(`/quests/${q.id}/heartbeat`, { stream_key: key, terminal: false });
+                        const r = await Traffic.enqueue(`/quests/${q.id}/heartbeat`, {
+                            stream_key: key,
+                            terminal: false,
+                            location: 11,
+                            is_targeted: false
+                        });
                         cur = r?.body?.progress?.[t.keyName]?.value ?? r?.body?.progress?.ACHIEVEMENT_IN_ACTIVITY?.value ?? cur;
                         Logger.updateTask(q.id, { name: t.name, type: "ACHIEVEMENT", cur, max: t.target, status: "RUNNING" });
                         failCount = 0;
 
                         if (cur >= t.target) {
-                            try { await Traffic.enqueue(`/quests/${q.id}/heartbeat`, { stream_key: key, terminal: true }); }
-                            catch (_) { }
+                            try {
+                                await Traffic.enqueue(`/quests/${q.id}/heartbeat`, {
+                                    stream_key: key,
+                                    terminal: true,
+                                    location: 11,
+                                    is_targeted: false
+                                });
+                            } catch (_) { }
                             break;
                         }
                     } catch (e) {
@@ -1088,13 +1113,24 @@
 
             while (cur < t.target && RUNTIME.running) {
                 try {
-                    const r = await Traffic.enqueue(`/quests/${q.id}/heartbeat`, { stream_key: key, terminal: false });
+                    const r = await Traffic.enqueue(`/quests/${q.id}/heartbeat`, {
+                        stream_key: key,
+                        terminal: false,
+                        location: 11,
+                        is_targeted: false
+                    });
                     cur = r?.body?.progress?.[t.keyName]?.value ?? r?.body?.progress?.PLAY_ACTIVITY?.value ?? cur + 20;
                     Logger.updateTask(q.id, { name: t.name, type: "ACTIVITY", cur, max: t.target, status: "RUNNING" });
                     failCount = 0;
                     if (cur >= t.target) {
-                        try { await Traffic.enqueue(`/quests/${q.id}/heartbeat`, { stream_key: key, terminal: true }); }
-                        catch (e) { Logger.log(`[ACTIVITY] Final heartbeat failed: ${e?.message}`, 'debug'); }
+                        try {
+                            await Traffic.enqueue(`/quests/${q.id}/heartbeat`, {
+                                stream_key: key,
+                                terminal: true,
+                                location: 11,
+                                is_targeted: false
+                            });
+                        } catch (e) { Logger.log(`[ACTIVITY] Final heartbeat failed: ${e?.message}`, 'debug'); }
                         break;
                     }
                 } catch (e) {
